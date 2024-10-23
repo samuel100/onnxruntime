@@ -1,3 +1,5 @@
+import itertools
+
 import onnx
 
 from ..quant_utils import (
@@ -8,6 +10,7 @@ from ..quant_utils import (
     quantize_nparray,
 )
 from .base_operator import QuantOperatorBase
+from .direct_q8 import QDQDirect8BitOp
 
 
 class QPad(QuantOperatorBase):
@@ -98,3 +101,53 @@ class QPad(QuantOperatorBase):
         node.input[0] = quantized_input_value.q_name
         node.output[0] = quantized_output_value.q_name
         self.quantizer.new_nodes += [node]
+
+
+class QDQPad(QDQDirect8BitOp):
+    def __init__(self, onnx_quantizer, onnx_node):
+        super().__init__(onnx_quantizer, onnx_node)
+
+    def _quantize_output_same_as_input(self):
+        return super().quantize()
+
+    def _get_pad_const_val(self, node, attrs_dict):
+        const_val = None
+        if self.quantizer.opset_version <= 2:
+            const_val = attrs_dict.get("value", 0)
+        elif len(node.input) >= 3 and node.input[2]:
+            const_val = self.quantizer.model.get_constant_value(node.input[2])
+        else:
+            const_val = 0
+
+        return const_val
+
+    def quantize(self):
+        node = self.node
+        assert node.op_type == "Pad"
+
+        attrs_dict = {}
+        for attribute in node.attribute:
+            kv = attribute_to_kwarg(attribute)
+            attrs_dict.update(kv)
+
+        pad_mode = attrs_dict.get("mode", b"constant")
+        if pad_mode in (b"reflect", b"edge", b"wrap"):
+            # These modes pad the output with a value that already exists in the input.
+            # So, we can quantize the output the same as the input.
+            return self._quantize_output_same_as_input()
+
+        # For 'constant' mode, if padding with 0, we can also quantize the output the same as the input
+        # because our quantization floating-point range always includes 0.
+        if pad_mode == b"constant":
+            const_val = self._get_pad_const_val(node, attrs_dict)
+            if const_val == 0:
+                return self._quantize_output_same_as_input()
+
+        # Otherwise, just quantize the input and output separately.
+        if self.disable_qdq_for_node_output:
+            tensors_to_quantize = node.input
+        else:
+            tensors_to_quantize = itertools.chain(node.input, node.output)
+
+        for tensor_name in tensors_to_quantize:
+            self.quantizer.quantize_activation_tensor(tensor_name)
