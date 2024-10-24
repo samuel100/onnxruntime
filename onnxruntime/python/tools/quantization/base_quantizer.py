@@ -313,10 +313,11 @@ class BaseQuantizer:
             assert isinstance(scale, np.ndarray), f"Unexpected type {type(scale)}"
 
         else:
+            symmetric = self.is_weight_symmetric if qType == self.weight_qType else self.is_activation_symmetric
             _, _, zero_point, scale, q_weight_data = quantize_data(
                 weight_data.flatten(),
                 qType,
-                quant_overrides.get("symmetric", self.is_weight_symmetric),
+                quant_overrides.get("symmetric", symmetric),
                 reduce_range=quant_overrides.get("reduce_range", self.reduce_range and reduce_range),
                 min_real_range=self.min_real_range,
                 rmin_override=quant_overrides.get("rmin"),

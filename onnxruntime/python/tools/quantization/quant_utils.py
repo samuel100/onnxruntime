@@ -249,7 +249,8 @@ def quantize_nparray(qType, arr, scale, zero_point, low=None, high=None):
         # which matches the python reference ONNX implementation of QuantizeLinear.
         # This data can be packed into 4-bit elements by using pack_bytes_to_4bit().
         dtype = ONNX_TYPE_TO_NP_TYPE[qType]
-        (qmin, qmax) = get_qmin_qmax_for_qType(qType, reduce_range=False, symmetric=True)
+        symmetric = qType in (onnx_proto.TensorProto.INT8, onnx_proto.TensorProto.INT16)
+        (qmin, qmax) = get_qmin_qmax_for_qType(qType, reduce_range=False, symmetric=symmetric)
 
         cliplow = max(qmin, low) if low is not None else qmin
         cliphigh = min(qmax, high) if high is not None else qmax
