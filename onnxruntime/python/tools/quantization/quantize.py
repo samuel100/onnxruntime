@@ -217,10 +217,11 @@ class StaticQuantConfig(QuantConfig):
         self.extra_options = extra_options or {}
 
 
-def get_full_int_qdq_config(
+def get_int_qdq_config(
     model_input: str | Path | onnx.ModelProto,
     calibration_data_reader: CalibrationDataReader,
     calibrate_method=CalibrationMethod.MinMax,
+    calibrate_args: dict[str, Any] | None = None,
     activation_type=QuantType.QUInt8,
     weight_type=QuantType.QInt8,
     activation_symmetric: bool = False,
@@ -319,6 +320,20 @@ def get_full_int_qdq_config(
         "ForceQuantizeNoInputCheck": True,
         "TensorQuantOverrides": overrides_helper.get_dict(),
     }
+
+    # Pass along known calibration options
+    if calibrate_args:
+        calib_extra_options_keys = [
+            ("symmetric", "CalibTensorRangeSymmetric"),
+            ("moving_average", "CalibMovingAverage"),
+            ("averaging_constant", "CalibMovingAverageConstant"),
+            ("max_intermediate_outputs", "CalibMaxIntermediateOutputs"),
+            ("percentile", "CalibPercentile"),
+        ]
+        calib_extra_options = {
+            key: extra_options.get(name) for (name, key) in calib_extra_options_keys if name in calibrate_args
+        }
+        final_extra_options.update(calib_extra_options)
 
     # ONNX opset < 21 does not support 16-bit quantization, so must use 'com.microsoft' domain
     # on Q/DQ operators if using 16-bit or 4-bit quantization.
