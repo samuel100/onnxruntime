@@ -540,18 +540,17 @@ class TestQDQPad(unittest.TestCase):
         constant_value: float | None = None,
     ) -> onnx.ModelProto:
         input_0 = onnx.helper.make_tensor_value_info("input_0", onnx.TensorProto.FLOAT, (3, 2))
-        output_0 = onnx.helper.make_tensor_value_info("output_0", onnx.TensorProto.FLOAT, None)
+        output_0 = onnx.helper.make_tensor_value_info("output_0", onnx.TensorProto.FLOAT, (3, 4))
 
         initializers = []
         pad_input_names = ["input_0"]
 
-        pads_data = np.array([0, 2, 0, 0], dtype=np.float32)  # Pad two vals at beginning of axis 1.
+        pads_data = np.array([0, 2, 0, 0], dtype=np.int64)  # Pad two vals at beginning of axis 1.
         initializers.append(onnx.numpy_helper.from_array(pads_data, "pads"))
         pad_input_names.append("pads")
 
         if mode == "constant" and constant_value is not None:
-            const_data = np.array(constant_value, dtype=np.float32)
-            initializers.append(onnx.numpy_helper.from_array(const_data, "constant_value"))
+            initializers.append(onnx.helper.make_tensor("constant_value", onnx.TensorProto.FLOAT, [], [constant_value]))
             pad_input_names.append("constant_value")
 
         pad_node = onnx.helper.make_node("Pad", pad_input_names, ["output_0"], name="Pad0", mode=mode)
