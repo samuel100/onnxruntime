@@ -331,7 +331,7 @@ def get_int_qdq_config(
             ("percentile", "CalibPercentile"),
         ]
         calib_extra_options = {
-            key: extra_options.get(name) for (name, key) in calib_extra_options_keys if name in calibrate_args
+            key: calibrate_args.get(name) for (name, key) in calib_extra_options_keys if name in calibrate_args
         }
         final_extra_options.update(calib_extra_options)
 
