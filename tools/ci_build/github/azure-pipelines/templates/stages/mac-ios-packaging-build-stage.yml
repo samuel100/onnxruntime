@@ -100,22 +100,17 @@ stages:
           --prepare_test_project_only
       displayName: "Assemble test project for App Center"
 
-    - task: Xcode@5
-      inputs:
-        actions: 'build-for-testing'
-        configuration: 'Debug'
-        xcWorkspacePath: '$(Build.BinariesDirectory)/app_center_test/apple_package_test/apple_package_test.xcworkspace'
-        sdk: 'iphoneos'
-        scheme: 'ios_package_test'
-        xcodeVersion: 'specifyPath'
-        xcodeDeveloperDir: '/Applications/Xcode_${{ variables.xcodeVersion }}.app/Contents/Developer'
-        signingOption: 'manual'
-        signingIdentity: '$(APPLE_CERTIFICATE_SIGNING_IDENTITY)'
-        provisioningProfileUuid: '$(APPLE_PROV_PROFILE_UUID)'
-        args: '-derivedDataPath $(Build.BinariesDirectory)/app_center_test/apple_package_test/DerivedData'
-        workingDirectory: '$(Build.BinariesDirectory)/app_center_test/apple_package_test/'
-        useXcpretty: false  # xcpretty can hide useful error output so we will disable it
-      displayName: 'Build App Center iPhone arm64 tests'
+    - script: |
+        xcodebuild build-for-testing \
+          -workspace "$(Build.BinariesDirectory)/app_center_test/apple_package_test/apple_package_test.xcworkspace" \
+          -scheme "ios_package_test" \
+          -configuration "Debug" \
+          -sdk "iphoneos" \
+          -derivedDataPath "$(Build.BinariesDirectory)/app_center_test/apple_package_test/DerivedData" \
+          CODE_SIGN_IDENTITY="$(APPLE_CERTIFICATE_SIGNING_IDENTITY)" \
+          PROVISIONING_PROFILE="$(APPLE_PROV_PROFILE_UUID)"
+      workingDirectory: '$(Build.BinariesDirectory)/app_center_test/apple_package_test/'
+      displayName: "Build BrowserStack iPhone arm64 tests"
 
     - script: |
         zip -r --symlinks $(Build.ArtifactStagingDirectory)/package_tests.zip ios_package_testUITests-Runner.app
@@ -127,23 +122,13 @@ stages:
       workingDirectory: '$(Build.BinariesDirectory)/app_center_test/apple_package_test/'
       displayName: "Generate .plist file for the .ipa file"
 
-    - task: Xcode@5
-      inputs:
-        actions: 'archive'
-        xcWorkspacePath: 'apple_package_test.xcworkspace'
-        packageApp: true
-        archivePath: '$(Build.BinariesDirectory)/app_center_test/apple_package_test/'
-        exportOptions: 'plist'
-        exportOptionsPlist: 'exportOptions.plist'
-        configuration: 'Debug'
-        sdk: 'iphoneos'
-        scheme: 'ios_package_test'
-        xcodeVersion: 'specifyPath'
-        xcodeDeveloperDir: '/Applications/Xcode_${{ variables.xcodeVersion }}.app/Contents/Developer'
-        args: '-derivedDataPath $(Build.BinariesDirectory)/app_center_test/apple_package_test/DerivedData'
-        workingDirectory: '$(Build.BinariesDirectory)/app_center_test/apple_package_test/'
-        useXcpretty: false
-      displayName: 'Create archive for the .ipa file'
+    - script: |
+        xcodebuild -exportArchive \
+          -archivePath /path/to/app.xcarchive \
+          -exportPath /path/to/ipa/dir \
+          -exportOptionsPlist /path/to/exportOptions.plist
+      workingDirectory: '$(Build.BinariesDirectory)/app_center_test/apple_package_test/'
+      displayName: "Create archive for the .ipa file"
 
     # Use script step because exporting the .ipa file using the Xcode@5 task was too brittle (Xcode@5 is designed
     # to handle both the .xcarchive step and the .ipa step in the same step -- ran into countless issues with signing
