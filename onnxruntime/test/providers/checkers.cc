@@ -180,6 +180,27 @@ struct TensorCheck {
 };
 
 template <>
+struct TensorCheck<bool> {
+  void operator()(const Tensor& expected, const Tensor& actual, const ValidateOutputParams& params,
+                  const std::string& /*provider_type*/) const {
+    ORT_UNUSED_PARAMETER(params);
+    Tensor expected_sorted, actual_sorted;
+    const bool* cur_expected;
+    const bool* cur_actual;
+    const auto size = actual.Shape().Size();
+    cur_expected = expected.Data<bool>();
+    cur_actual = actual.Data<bool>();
+
+    for (size_t i = 0; i < static_cast<size_t>(size); ++i) {
+      bool expected_is_true = cur_expected[i] != false;
+      bool actual_is_true = cur_actual[i] != false;
+
+      EXPECT_EQ(expected_is_true, actual_is_true) << "i: " << i;
+    }
+  }
+};
+
+template <>
 struct TensorCheck<Int4x2> {
   void operator()(const Tensor& expected, const Tensor& actual, const ValidateOutputParams& params,
                   const std::string& /*provider_type*/) const {

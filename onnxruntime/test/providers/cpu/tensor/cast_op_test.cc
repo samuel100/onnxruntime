@@ -57,7 +57,7 @@ void TestCastOp(gsl::span<const SrcType> input,
                 const BaseTester::DimsVariant& dimensions,
                 OpTester::ExpectResult expect_result = OpTester::ExpectResult::kExpectSuccess,
                 const std::string& expected_failure_string = "",
-                int opset = 13,
+                int opset = 21,
                 Saturate saturate = Saturate::None) {
   OpTester test("Cast", opset);
   test.AddAttribute<int64_t>("to", utils::ToTensorProtoElementType<DstType>());
@@ -149,10 +149,6 @@ using CastNonStringTypes =
         MLFloat16, BFloat16>;
 
 TEST(CastOpTest, NonStringTypes) {
-  // TODO: Unskip when fixed #41968513
-  if (DefaultDmlExecutionProvider().get() != nullptr) {
-    GTEST_SKIP() << "Skipping because of the following error: Expected equality of these values: true and true";
-  }
 
   boost::mp11::mp_for_each<boost::mp11::mp_product<std::pair, CastNonStringTypes, CastNonStringTypes>>(
       CastNonStringTester{});
