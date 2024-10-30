@@ -40,17 +40,25 @@ class QuantizationParams:
         for k, v in data.items():
             if not isinstance(k, str):
                 raise TypeError(f"Keys must be strings not {type(k)} for k={k!r}.")
-            if not isinstance(v, (int, str, np.ndarray)):
+            if k != "axis" and not isinstance(v, (int, str, np.ndarray)):
                 raise TypeError(f"Values must be numpy arrays, int, float, str not {type(v)} for k={k!r}.")
+            if k == "axis" and not isinstance(v, int) and v is not None:
+                raise TypeError(f"Axis value must be an int or None, not {type(v)}.")
             if k == "scale" and v.dtype not in (np.float32, np.float16):
                 raise ValueError(f"scale must a float32 or float16 numpy element but is {v.dtype} for k={k!r}")
             self.data[k] = v
+
+    def get(self, key, default_value=None):
+        return self.data.get(key, default_value)
 
     def __iter__(self):
         yield from self.data
 
     def __getitem__(self, key):
         return self.data[key]
+
+    def __setitem__(self, key, value):
+        self.data[key] = value
 
     def __len__(self):
         return len(self.data)
@@ -314,7 +322,7 @@ class BaseQuantizer:
 
         else:
             symmetric = self.is_weight_symmetric if qType == self.weight_qType else self.is_activation_symmetric
-            _, _, zero_point, scale, q_weight_data = quantize_data(
+            zero_point, scale, q_weight_data = quantize_data(
                 weight_data.flatten(),
                 qType,
                 quant_overrides.get("symmetric", symmetric),
@@ -455,7 +463,7 @@ class BaseQuantizer:
                 ), f"Unexpected type {type(quantized_per_channel_data)}"
 
             else:
-                _, _, zero_point, scale, quantized_per_channel_data = quantize_data(
+                zero_point, scale, quantized_per_channel_data = quantize_data(
                     per_channel_data.flatten(),
                     weight_qType,
                     symmetric,

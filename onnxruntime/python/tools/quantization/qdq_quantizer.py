@@ -20,10 +20,10 @@ from .base_quantizer import BaseQuantizer, QuantizationParams
 from .calibrate import TensorData
 from .quant_utils import (
     DEQUANT_OP_NAME,
+    ONNX_TYPE_TO_NP_TYPE,
     QUANT_OP_NAME,
     QuantizedValue,
     QuantizedValueType,
-    QuantType,
     __producer__,
     __version__,
     add_dequant_output_suffix,
@@ -31,13 +31,14 @@ from .quant_utils import (
     add_quant_input_suffix,
     add_quant_output_suffix,
     add_quant_suffix,
-    compute_data_scale_zp,
+    compute_data_quant_params,
     compute_scale_zp,
     compute_scale_zp_float8,
     find_by_name,
     get_qmin_qmax_for_qType,
     ms_domain,
     normalize_axis,
+    quantize_onnx_initializer,
     tensor_proto_to_array,
 )
 from .registry import CreateQDQQuantizer
@@ -230,6 +231,7 @@ class QDQQuantizer(BaseQuantizer):
                 self.qdq_op_domain = ms_domain
 
         self.quantization_params = self.calc_graph_quant_params()
+        self.initializer_quant_params: dict[str, QuantizationParams] = {}
 
         # Map of all original value names to quantized value names
         self.quantized_value_map = {}
@@ -406,71 +408,14 @@ class QDQQuantizer(BaseQuantizer):
         # Add this to our list of biases to quantize.
         self.bias_to_quantize[actual_bias_name] = QDQBiasQuantInfo(node_name, input_name, weight_name, beta)
 
-    def _get_initializer_per_tensor_qparams(
-        self,
-        initializer: onnx.TensorProto,
-        quant_type: onnx.TensorProto.DataType,
-        symmetric: bool,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Returns the zero_point and scale for an initializer to be quantized per-tensor.
-        """
-        weight_data = tensor_proto_to_array(initializer)
-        _, _, zero_point, scale = compute_data_scale_zp(
-            weight_data.flatten(),
-            quant_type,
-            symmetric,
-            reduce_range=self.reduce_range,
-            min_real_range=self.min_real_range,
-        )
-        return zero_point, scale
-
-    def _get_initializer_per_channel_qparams(
-        self,
-        initializer: onnx.TensorProto,
-        quant_type: onnx.TensorProto.DataType,
-        symmetric: bool,
-        channel_axis: int,
-    ) -> tuple[list[np.ndarray], list[np.ndarray]]:
-        """
-        Returns a list of zero_points and a list of scales for an initializer to be quantized per-channel.
-        """
-        weights = tensor_proto_to_array(initializer)
-        weights_rank = len(weights.shape)
-        is_axis_valid, axis_norm = normalize_axis(channel_axis, weights_rank)
-        if not is_axis_valid:
-            raise ValueError(
-                f"Weight {initializer.name} has a per-channel axis with value {channel_axis} that is "
-                f"out-of-bounds for rank {weights_rank}"
-            )
-
-        channel_axis = axis_norm
-        channel_count = weights.shape[channel_axis]
-
-        zero_points = []
-        scales = []
-        for i in range(channel_count):
-            per_channel_data = weights.take(i, channel_axis)
-            _, _, zero_point, scale = compute_data_scale_zp(
-                per_channel_data.flatten(),
-                quant_type,
-                symmetric,
-                reduce_range=self.reduce_range,
-                min_real_range=self.min_real_range,
-            )
-            zero_points.append(zero_point)
-            scales.append(scale)
-
-        return zero_points, scales
-
     def _adjust_weight_scale_for_int32_bias(
         self,
         input_scale: np.ndarray,
-        weight_scales: list[np.ndarray],
+        weight_scale: np.ndarray,
         weight_name: str,
         bias_tp: onnx.TensorProto,
         is_per_channel: bool,
-    ) -> tuple[bool, list[np.ndarray]]:
+    ) -> tuple[bool, np.ndarray | None]:
         """
         Checks if the bias scale (input_scale * weight_scale) that we intend to use is too small.
         A bias scale that is too small leads to quantized bias values that fall outside the range of a int32 and have to
@@ -480,15 +425,15 @@ class QDQQuantizer(BaseQuantizer):
         reference:
         https://github.com/tensorflow/tensorflow/blob/master/tensorflow/lite/tools/optimize/quantization_utils.cc#L252
         """
-        if not weight_scales:
-            return False, []
+        if not weight_scale.size:
+            return False, None
 
         bias_float_data = tensor_proto_to_array(bias_tp)
 
         int32_info = np.iinfo(np.int32)
         multiplicative_epsilon = 1.0001
-        qrange = np.array(int32_info.max, dtype=np.float64) - np.array(int32_info.min, dtype=np.float64)
-        weight_scale_dtype = weight_scales[0].dtype
+        qrange = np.array(int32_info.max, dtype=np.float64) - np.array(int32_info.min + 1, dtype=np.float64)
+        weight_scale_dtype = weight_scale.dtype
         updated_an_elem = False
 
         if not is_per_channel:
@@ -496,9 +441,10 @@ class QDQQuantizer(BaseQuantizer):
             rmax = np.maximum(bias_float_data.max(), np.array(0, dtype=np.float64))
             absmax = np.maximum(np.abs(rmin), np.abs(rmax))
             bias_smallest_valid_scale = multiplicative_epsilon * (2.0 * absmax) / qrange
-            bias_candidate_scale = np.asarray(input_scale.item(), dtype=np.float64) * np.asarray(
-                weight_scales[0], dtype=np.float64
-            )
+
+            input_scale_fp64 = np.array(input_scale.item(), dtype=np.float64)
+            weight_scale_fp64 = np.array(weight_scale.item(), dtype=np.float64)
+            bias_candidate_scale = input_scale_fp64 * weight_scale_fp64
 
             if (bias_candidate_scale < bias_smallest_valid_scale) and (bias_candidate_scale > 0.0):
                 # The candidate bias scale would be too small, so increase the weight_scale by the necessary ratio.
@@ -507,18 +453,20 @@ class QDQQuantizer(BaseQuantizer):
                     f"Increasing scale for weight `{weight_name}` by the ratio {ratio} to "
                     f"ensure bias input `{bias_tp.name}` has a valid scale."
                 )
-                weight_scales[0] = weight_scales[0] * np.asarray(ratio, dtype=weight_scale_dtype)
+                new_scale = weight_scale_fp64 * ratio
+                weight_scale = new_scale.astype(weight_scale_dtype)
                 updated_an_elem = True
-        else:
+        elif weight_scale.shape and len(weight_scale.shape) == 1:
             # per-channel case
-            num_elems = len(weight_scales)
+            num_elems = weight_scale.shape[0]
 
             for i in range(num_elems):
                 bias_rmax = np.abs(bias_float_data[i])
                 bias_smallest_valid_scale = multiplicative_epsilon * (2.0 * bias_rmax) / qrange
-                bias_candidate_scale = np.asarray(input_scale.item(), dtype=np.float64) * np.asarray(
-                    weight_scales[i], dtype=np.float64
-                )
+
+                input_scale_fp64 = np.array(input_scale.item(), dtype=np.float64)
+                weight_scale_fp64 = np.array(weight_scale[i].item(), dtype=np.float64)
+                bias_candidate_scale = input_scale_fp64 * weight_scale_fp64
                 if (bias_candidate_scale < bias_smallest_valid_scale) and (bias_candidate_scale > 0.0):
                     # The candidate bias scale would be too small, so increase the weight_scale by the necessary ratio.
                     ratio = bias_smallest_valid_scale / bias_candidate_scale
@@ -526,12 +474,13 @@ class QDQQuantizer(BaseQuantizer):
                         f"Increased scale[{i}] for weight `{weight_name}` by ratio {ratio} "
                         f"to ensure bias input `{bias_tp.name}` has a valid scale."
                     )
-                    weight_scales[i] = weight_scales[i] * np.asarray(ratio, dtype=weight_scale_dtype)
+                    new_scale = weight_scale_fp64 * ratio
+                    weight_scale[i] = new_scale.astype(weight_scale_dtype)
                     updated_an_elem = True
 
-        return updated_an_elem, weight_scales
+        return updated_an_elem, weight_scale
 
-    def _adjust_weights_for_bias_tensors(self):
+    def _adjust_weight_quant_params_for_bias_tensors(self):
         """
         Iterates through all bias inputs that should be quantized to int32. If the intended
         bias scale (equal to input_scale * weight_scale) is too small, this function will increase
@@ -542,19 +491,11 @@ class QDQQuantizer(BaseQuantizer):
             # Use passed an extra_option to disable this adjustment.
             return
 
-        if self.weight_qType == onnx.TensorProto.FLOAT8E4M3FN:
-            # Do nothing for float8 weight quantization.
-            return
-
         for bias_name, bias_info in self.bias_to_quantize.items():
-            if bias_info.weight_name in self.tensor_quant_overrides:
-                # No need to adjust if the user already provided overrides for the associated weight.
-                # We'll use the tensor overrides to set "adjusted" weight scales.
-                continue
-
             if (
                 bias_info.input_name not in self.quantization_params
                 or bias_info.input_name not in self.tensors_to_quantize
+                or bias_info.weight_name not in self.initializer_quant_params
             ):
                 continue
 
@@ -565,59 +506,30 @@ class QDQQuantizer(BaseQuantizer):
                 input_qparams["scale"], dtype=onnx.helper.tensor_dtype_to_np_dtype(input_info.data_type)
             )
 
-            weight_initializer = find_by_name(bias_info.weight_name, self.model.initializer())
-            if weight_initializer is None or bias_info.weight_name not in self.tensors_to_quantize:
-                # Only adjust if the weight input is an initializer for simplicity.
+            weight_quant_params = self.initializer_quant_params[bias_info.weight_name]
+            weight_quant_type = weight_quant_params["quant_type"]
+            if weight_quant_type not in (onnx.TensorProto.INT8, onnx.TensorProto.INT16):
                 continue
 
-            if not self.is_weight_symmetric:
-                # Only handle symmetric weights
+            weight_zero_point: np.ndarray = weight_quant_params["zero_point"]
+            if weight_zero_point.any():
+                # Skip if zero_point(s) are not all zero (i.e., symmetric quant)
                 continue
 
-            # Get the associated weight's scale (could be per-tensor or per-channel)
-            weight_info = self.tensors_to_quantize[bias_info.weight_name]
-            is_per_channel = weight_info.axis is not None
-            weight_scales: list[np.ndarray] = []
-            weight_zero_points: list[np.ndarray] = []
-            if is_per_channel:
-                weight_zero_points, weight_scales = self._get_initializer_per_channel_qparams(
-                    weight_initializer,
-                    self.weight_qType,
-                    self.is_weight_symmetric,
-                    weight_info.axis,
-                )
-            else:
-                zero_point, scale = self._get_initializer_per_tensor_qparams(
-                    weight_initializer,
-                    self.weight_qType,
-                    self.is_weight_symmetric,
-                )
-                weight_zero_points.append(zero_point)
-                weight_scales.append(scale)
+            weight_scale: np.ndarray = weight_quant_params["scale"]
+            is_per_channel = "axis" in weight_quant_params
 
             # Get adjusted weight scales.
-            updated_scales, weight_scales = self._adjust_weight_scale_for_int32_bias(
+            did_update_weight_scale, new_weight_scale = self._adjust_weight_scale_for_int32_bias(
                 input_scale,
-                weight_scales,
+                weight_scale,
                 bias_info.weight_name,
                 find_by_name(bias_name, self.model.initializer()),
                 is_per_channel,
             )
 
-            if updated_scales:
-                # Set quantization overrides for the weight's new scale.
-                # We don't quantize the weight initializer here.
-                weight_overrides = []
-                for index, (zero_point, scale) in enumerate(zip(weight_zero_points, weight_scales)):
-                    channel_override = {"quant_type": QuantType.from_tensor_type(self.weight_qType)}
-                    if is_per_channel and index == 0:
-                        channel_override["axis"] = weight_info.axis
-
-                    channel_override["scale"] = scale
-                    channel_override["zero_point"] = zero_point
-                    weight_overrides.append(channel_override)
-
-                self.tensor_quant_overrides[bias_info.weight_name] = weight_overrides
+            if did_update_weight_scale:
+                weight_quant_params["scale"] = new_weight_scale
 
     def remove_node(self, node):
         self.nodes_to_remove.append(node)
@@ -636,7 +548,8 @@ class QDQQuantizer(BaseQuantizer):
                         self.tensor_to_its_receiving_nodes[tensor_name] = []
                     self.tensor_to_its_receiving_nodes[tensor_name].append(node)
 
-        self._adjust_weights_for_bias_tensors()
+        self.initializer_quant_params = self._calc_initializer_quant_params()
+        self._adjust_weight_quant_params_for_bias_tensors()
         self._quantize_normal_tensors()
         self._quantize_sharing_param_tensors()
         if self.quantize_bias:
@@ -732,38 +645,26 @@ class QDQQuantizer(BaseQuantizer):
         )
         self.model.add_nodes([qlinear_node, dequant_node])
 
-    def _add_qdq_pair_for_initializer(self, weight_proto, tensor_type, axis=None):
+    def _add_qdq_nodes_for_initializer(self, weight_proto: onnx.TensorProto):
+        """
+        Adds Q/DQ nodes for an initializer. If `self.add_qdq_pair_to_weight` is true, creates
+        the sequence (weight_f32 -> Q -> DQ -> ). Otherwise, this function quantizes the initializer
+        and adds the sequence (weight_quant -> DQ ->).
+        """
         weight_name = weight_proto.name
-        if axis is not None:
-            if self.opset_version < 13:
-                raise ValueError("Per-Channel support with QDQ format requires onnx opset version 13 or above.")
+        if weight_name in self.quantized_value_map:
+            return
 
-            qtype = self.weight_qType if tensor_type is QDQQuantTensorType.WEIGHT else self.activation_qType
-            if qtype == onnx.onnx_pb.TensorProto.UINT8:
-                qtype = onnx_proto.TensorProto.INT8
-
-            q_weight_name, zp_name, scale_name = self.quantize_weight_per_channel(
-                weight_name,
-                # Quantization type is forced to be TensorProto.INT8.
-                # when the expected value would be (see below)
-                # self.weight_qType if tensor_type is QDQQuantTensorType.WEIGHT else self.activation_qType.
-                # QLinearConv expects to have a unique value for all channels.
-                # This code does not enforce that but it is necessarily the case when the
-                # quantization is symmetric (as for INT8).
-                qtype,
-                axis,
-                keep_float_weight=self.add_qdq_pair_to_weight,
-            )
-        else:
-            q_weight_name, zp_name, scale_name = self.quantize_initializer(
-                weight_proto,
-                self.weight_qType if tensor_type is QDQQuantTensorType.WEIGHT else self.activation_qType,
-                keep_float_weight=self.add_qdq_pair_to_weight,
-            )
-
+        quant_params: QuantizationParams = self.initializer_quant_params[weight_name]
+        axis: int = quant_params.get("axis")
+        scale_zp_initializers = self._make_scale_zp_initializers(weight_name, quant_params)
+        q_weight_name: str | None = None
         weight_dequant_output = add_dequant_output_suffix(weight_name)
         self.model.replace_input_of_all_nodes(weight_name, weight_dequant_output)
+
         if self.add_qdq_pair_to_weight:
+            # Don't actually quantize the weight. Instead, keep floating-point weight and create the node
+            # sequence (weight_f32 -> Q -> DQ -> weight_dequant)
             weight_quant_output = add_quant_output_suffix(weight_name)
 
             self._create_qdq_nodes(
@@ -773,20 +674,43 @@ class QDQQuantizer(BaseQuantizer):
                 weight_quant_output,
                 weight_dequant_output,
                 add_dequant_suffix(weight_name),
-                scale_name,
-                zp_name,
+                scale_zp_initializers.scale.name,
+                scale_zp_initializers.zero_point.name,
                 axis,
             )
         else:
+            # Quantize the weight and create the node sequence:
+            # (weight_quantized -> DQ -> weight_dequant)
+            quant_weight = quantize_onnx_initializer(
+                weight_proto,
+                quant_params["quant_type"],
+                quant_params["zero_point"],
+                quant_params["scale"],
+                axis,
+            )
+            self.model.add_initializer(quant_weight)
+
+            q_weight_name = quant_weight.name
             dequant_node = onnx.helper.make_node(
                 DEQUANT_OP_NAME,
-                [q_weight_name, scale_name, zp_name],
+                [quant_weight.name, scale_zp_initializers.scale.name, scale_zp_initializers.zero_point.name],
                 [weight_dequant_output],
                 add_dequant_suffix(weight_name),
                 axis=axis,
                 domain=self.qdq_op_domain,
             )
             self.model.add_node(dequant_node)
+
+        # Log entry for this quantized weight
+        quantized_value = QuantizedValue(
+            weight_name,
+            q_weight_name,
+            scale_zp_initializers.scale.name,
+            scale_zp_initializers.zero_point.name,
+            QuantizedValueType.Initializer,
+            axis=axis,
+        )
+        self.quantized_value_map[weight_name] = QDQTensorQuantizedValue(quantized_value, None, None)
 
     def _add_qdq_pair_for_activation(self, tensor_name, scale_name, zp_name, data_type=None):
         if (
@@ -1024,7 +948,7 @@ class QDQQuantizer(BaseQuantizer):
                 # Quantize the input
                 initializer = find_by_name(tensor_name, self.model.initializer())
                 if initializer:
-                    self._add_qdq_pair_for_initializer(initializer, tensor_info.tensor_type, tensor_info.axis)
+                    self._add_qdq_nodes_for_initializer(initializer)
                 else:
                     tensor_qparam_initializers = self._make_tensor_scale_zp_initializers(tensor_name)
                     if not tensor_qparam_initializers:
@@ -1166,45 +1090,6 @@ class QDQQuantizer(BaseQuantizer):
     def is_tensor_quantized(self, tensor_name: str):
         return tensor_name in self.tensors_to_quantize or tensor_name in self.bias_to_quantize
 
-    def quantize_initializer(
-        self,
-        weight: onnx.TensorProto,
-        qType: onnx.TensorProto.DataType,
-        reduce_range: bool = False,
-        keep_float_weight: bool = False,
-    ) -> tuple[str, str, str]:
-        """
-        :param weight: TensorProto initializer
-        :param qType: type to quantize to
-        :param keep_float_weight: Whether to quantize the weight. In some cases, we only want to qunatize scale and zero point.
-                                  If keep_float_weight is False, quantize the weight, or don't quantize the weight.
-        :return: quantized weight name, zero point name, scale name
-        """
-        # Find if this input is already quantized
-        if weight.name in self.quantized_value_map:
-            quantized_value = self.quantized_value_map[weight.name].original
-            return (
-                quantized_value.q_name,
-                quantized_value.zp_name,
-                quantized_value.scale_name,
-            )
-
-        q_weight_name, zp_name, scale_name = self.quantize_initializer_impl(
-            weight, qType, reduce_range, keep_float_weight
-        )
-
-        # Log entry for this quantized weight
-        quantized_value = QuantizedValue(
-            weight.name,
-            q_weight_name,
-            scale_name,
-            zp_name,
-            QuantizedValueType.Initializer,
-            None,
-        )
-        self.quantized_value_map[weight.name] = QDQTensorQuantizedValue(quantized_value, None, None)
-        return q_weight_name, zp_name, scale_name
-
     def is_tensor_per_channel(
         self,
         tensor_name: str,
@@ -1254,38 +1139,6 @@ class QDQQuantizer(BaseQuantizer):
 
         return True, axis
 
-    def quantize_weight_per_channel(
-        self,
-        weight_name: str,
-        weight_qType: onnx.TensorProto.DataType,
-        channel_axis: int,
-        reduce_range: bool = True,
-        keep_float_weight: bool = False,
-    ) -> tuple[str, str, str]:
-        # Find if this input is already quantized
-        if weight_name in self.quantized_value_map:
-            quantized_value = self.quantized_value_map[weight_name].original
-            return (
-                quantized_value.q_name,
-                quantized_value.zp_name,
-                quantized_value.scale_name,
-            )
-
-        q_weight_name, zp_name, scale_name = self.quantize_weight_per_channel_impl(
-            weight_name, weight_qType, channel_axis, reduce_range, keep_float_weight
-        )
-        quantized_value = QuantizedValue(
-            weight_name,
-            q_weight_name,
-            scale_name,
-            zp_name,
-            QuantizedValueType.Initializer,
-            None,
-        )
-        self.quantized_value_map[weight_name] = QDQTensorQuantizedValue(quantized_value, None, None)
-
-        return q_weight_name, zp_name, scale_name
-
     def quantize_bias_static(self, bias_name: str, bias_info: QDQBiasQuantInfo) -> str:
         """
         Quantized the bias. Zero Point == 0 and Scale == Input_Scale * Weight_Scale
@@ -1331,7 +1184,7 @@ class QDQQuantizer(BaseQuantizer):
         return quantized_bias_name
 
     def _make_scale_zp_initializers(
-        self, param_name: str, params: QuantizationParams, init_name_suffix: str = ""
+        self, param_name: str, quant_params: QuantizationParams, init_name_suffix: str = ""
     ) -> QDQScaleZpInitializers:
         """
         Creates and returns scale and zero-point initializers for the given quantization params. The initializers are
@@ -1339,31 +1192,31 @@ class QDQQuantizer(BaseQuantizer):
             - {param_name}_zero_point{init_name_suffix}
             - {param_name}_scale{init_name_suffix}
         """
-        zero_point_values = np.array([params["zero_point"]])
-        if not hasattr(params["scale"], "dtype") or params["scale"].dtype not in (np.float32, np.float16):
-            raise ValueError(f"Unexpected type {type(params['scale'])} and param_name={param_name!r}")
-        scale_values = np.array([params["scale"]])
-        assert scale_values.dtype != np.float64
-        zero_point_type = params.data.get("quant_type", self.activation_qType)
+        zero_point = quant_params["zero_point"]
+        scale = quant_params["scale"]
+        zero_point_type = quant_params["quant_type"]
+        axis: int | None = quant_params.get("axis")
+        assert (axis is not None and len(scale.shape) == 1) or (
+            axis is None and len(scale.shape) == 0
+        ), "Wrong scale/zp shapes"
+        assert len(scale.shape) == len(zero_point.shape), "Scale and zero-point must have the same rank"
 
-        zero_point_shape = []
         zero_point_name = param_name + "_zero_point" + init_name_suffix
-        scale_shape = []
         scale_name = param_name + "_scale" + init_name_suffix
 
         # Add initializers to model
         init_zp = onnx.helper.make_tensor(
-            zero_point_name, zero_point_type, zero_point_shape, zero_point_values.ravel().tolist()
+            zero_point_name, zero_point_type, zero_point.shape, zero_point.ravel().tolist()
         )
         self.model.add_initializer(init_zp)
 
-        if scale_values.dtype == np.float32:
+        if scale.dtype == np.float32:
             scale_type = onnx_proto.TensorProto.FLOAT
-        elif scale_values.dtype == np.float16:
+        elif scale.dtype == np.float16:
             scale_type = onnx_proto.TensorProto.FLOAT16
         else:
-            raise ValueError(f"Unexpected dtype={scale_values.dtype} for param_name={param_name!r}")
-        init_scale = onnx.helper.make_tensor(scale_name, scale_type, scale_shape, scale_values.reshape((-1,)).tolist())
+            raise ValueError(f"Unexpected dtype={scale.dtype} for param_name={param_name!r}")
+        init_scale = onnx.helper.make_tensor(scale_name, scale_type, scale.shape, scale.ravel().tolist())
         self.model.add_initializer(init_scale)
 
         return QDQScaleZpInitializers(init_scale, init_zp)
@@ -1412,7 +1265,7 @@ class QDQQuantizer(BaseQuantizer):
             qmin, qmax = get_qmin_qmax_for_qType(quant_type, reduce_range=reduce_range, symmetric=symmetric)
             zero, scale = compute_scale_zp(rmin, rmax, qmin, qmax, symmetric, self.min_real_range)
 
-        return QuantizationParams(zero_point=zero, scale=scale, quant_type=quant_type)
+        return QuantizationParams(zero_point=zero.squeeze(), scale=scale.squeeze(), quant_type=quant_type)
 
     def calc_graph_quant_params(self) -> dict[str, QDQTensorQuantParams]:
         """
@@ -1440,5 +1293,121 @@ class QDQQuantizer(BaseQuantizer):
                 converted_recv_nodes = quant_overrides["convert"].get("recv_nodes")
 
             quantization_params[tensor_name] = QDQTensorQuantParams(original, converted, converted_recv_nodes)
+
+        return quantization_params
+
+    def _calc_initializer_quant_params(self) -> dict[str, QuantizationParams]:
+        """
+        Returns quantization parameters (scale/zero_point/quant_type) for all initializers.
+        """
+
+        quantization_params: dict[str, QuantizationParams] = {}
+        for tensor_name, tensor_info in self.tensors_to_quantize.items():
+            initializer = find_by_name(tensor_name, self.model.initializer())
+            if not initializer:
+                continue
+
+            initializer_data = tensor_proto_to_array(initializer)
+            initializer_rank = len(initializer_data.shape)
+
+            # Try to get scale/zp directly from user's overrides and avoid computation.
+            if self.tensor_quant_overrides.overrides_scale_zp(tensor_name):
+                overrides = self.tensor_quant_overrides[tensor_name]
+                quant_type = overrides[0]["quant_type"].tensor_type
+                zp_dtype = ONNX_TYPE_TO_NP_TYPE[quant_type]
+                is_per_channel = "axis" in overrides[0]
+                if not is_per_channel:
+                    quantization_params[tensor_name] = QuantizationParams(
+                        zero_point=np.array(overrides[0]["zero_point"], dtype=zp_dtype),
+                        scale=np.array(overrides[0]["scale"], initializer_data.dtype),
+                        quant_type=quant_type,
+                    )
+                else:
+                    zero_points_list = []
+                    scales_list = []
+                    for chan_overrides in overrides:
+                        zero_points_list.append(np.array(chan_overrides["zero_point"], zp_dtype))
+                        scales_list.append(np.array(chan_overrides["scale"], dtype=initializer_data.dtype))
+
+                    channel_axis = overrides[0]["axis"]
+                    is_axis_valid, norm_channel_axis = normalize_axis(channel_axis, initializer_rank)
+                    if not is_axis_valid:
+                        raise ValueError(
+                            f"Weight {initializer.name} has a per-channel axis with value {channel_axis} that is "
+                            f"out-of-bounds for rank {initializer_rank}"
+                        )
+
+                    quantization_params[tensor_name] = QuantizationParams(
+                        zero_point=np.array(zero_points_list),
+                        scale=np.array(scales_list),
+                        quant_type=quant_type,
+                        axis=norm_channel_axis,
+                    )
+
+                continue
+
+            # Compute scale/zp normally. User's overrides may still override parameters
+            # used to compute the scale/zp (e.g., rmin, rmax, symmetric, etc.)
+            is_weight = tensor_info.tensor_type is QDQQuantTensorType.WEIGHT  # initializers for elementwise ops can be
+            # considered activations
+            overrides = self.tensor_quant_overrides.get(tensor_name, [{}])
+
+            quant_type = self.weight_qType if is_weight else self.activation_qType
+            if "quant_type" in overrides[0]:
+                quant_type = overrides[0]["quant_type"].tensor_type
+
+            channel_axis = overrides[0].get("axis", tensor_info.axis)
+            is_per_channel = channel_axis is not None
+            is_symmetric = overrides[0].get(
+                "symmetric", is_per_channel or (self.is_weight_symmetric if is_weight else self.is_activation_symmetric)
+            )
+            reduce_range = overrides[0].get("reduce_range", self.reduce_range)
+            zero_point: np.ndarray | None = None
+            scale: np.ndarray | None = None
+
+            if not is_per_channel:
+                zero_point, scale = compute_data_quant_params(
+                    initializer_data.flatten(),
+                    quant_type,
+                    is_symmetric,
+                    reduce_range=reduce_range,
+                    min_real_range=self.min_real_range,
+                )
+            else:
+                is_axis_valid, norm_channel_axis = normalize_axis(channel_axis, initializer_rank)
+                if not is_axis_valid:
+                    raise ValueError(
+                        f"Weight {initializer.name} has a per-channel axis with value {channel_axis} that is "
+                        f"out-of-bounds for rank {initializer_rank}"
+                    )
+
+                channel_axis = norm_channel_axis
+                channel_count = initializer_data.shape[channel_axis]
+                zero_points_list = []
+                scales_list = []
+                for i in range(channel_count):
+                    per_channel_data = initializer_data.take(i, channel_axis)
+                    channel_overrides = overrides[i] if overrides and i < len(overrides) else {}
+                    channel_zero_point, channel_scale = compute_data_quant_params(
+                        per_channel_data.ravel(),
+                        quant_type,
+                        is_symmetric,
+                        reduce_range=reduce_range,
+                        min_real_range=self.min_real_range,
+                        rmin_override=channel_overrides.get("rmin"),
+                        rmax_override=channel_overrides.get("rmax"),
+                    )
+                    zero_points_list.append(channel_zero_point)
+                    scales_list.append(channel_scale)
+
+                zero_point = np.asarray(zero_points_list)
+                scale = np.asarray(scales_list)
+
+            quantization_params[tensor_name] = QuantizationParams(
+                zero_point=zero_point,
+                scale=scale,
+                quant_type=quant_type,
+                axis=channel_axis,
+            )
 
         return quantization_params
