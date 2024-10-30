@@ -517,7 +517,7 @@ class QDQQuantizer(BaseQuantizer):
                 continue
 
             weight_scale: np.ndarray = weight_quant_params["scale"]
-            is_per_channel = "axis" in weight_quant_params
+            is_per_channel = weight_quant_params.get("axis", None) is not None
 
             # Get adjusted weight scales.
             did_update_weight_scale, new_weight_scale = self._adjust_weight_scale_for_int32_bias(
