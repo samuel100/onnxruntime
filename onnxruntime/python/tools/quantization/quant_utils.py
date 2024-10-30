@@ -296,7 +296,7 @@ def compute_scale_zp(rmin, rmax, qmin, qmax, symmetric=False, min_real_range=Non
 
     # Ensure a minimum float-point range if specified.
     if min_real_range is not None:
-        rmax = max(rmax, rmin + min_real_range)
+        rmax = max(rmax, rmin + numpy.asarray(min_real_range, dtype=rmin.dtype))
 
     if symmetric:
         absmax = numpy.maximum(numpy.abs(rmin), numpy.abs(rmax))

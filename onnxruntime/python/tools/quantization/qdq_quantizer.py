@@ -24,6 +24,7 @@ from .quant_utils import (
     QUANT_OP_NAME,
     QuantizedValue,
     QuantizedValueType,
+    QuantType,
     __producer__,
     __version__,
     add_dequant_output_suffix,
@@ -1310,10 +1311,16 @@ class QDQQuantizer(BaseQuantizer):
             initializer_data = tensor_proto_to_array(initializer)
             initializer_rank = len(initializer_data.shape)
 
+            # initializers for elementwise ops can be considered activations.
+            is_weight = tensor_info.tensor_type is QDQQuantTensorType.WEIGHT
+            quant_type = self.weight_qType if is_weight else self.activation_qType
+
             # Try to get scale/zp directly from user's overrides and avoid computation.
             if self.tensor_quant_overrides.overrides_scale_zp(tensor_name):
                 overrides = self.tensor_quant_overrides[tensor_name]
-                quant_type = overrides[0]["quant_type"].tensor_type
+                if "quant_type" in overrides[0]:
+                    quant_type = overrides[0]["quant_type"].tensor_type
+
                 zp_dtype = ONNX_TYPE_TO_NP_TYPE[quant_type]
                 is_per_channel = "axis" in overrides[0]
                 if not is_per_channel:
@@ -1348,13 +1355,19 @@ class QDQQuantizer(BaseQuantizer):
 
             # Compute scale/zp normally. User's overrides may still override parameters
             # used to compute the scale/zp (e.g., rmin, rmax, symmetric, etc.)
-            is_weight = tensor_info.tensor_type is QDQQuantTensorType.WEIGHT  # initializers for elementwise ops can be
-            # considered activations
+            is_symmetric = self.is_weight_symmetric if is_weight else self.is_activation_symmetric
             overrides = self.tensor_quant_overrides.get(tensor_name, [{}])
 
-            quant_type = self.weight_qType if is_weight else self.activation_qType
             if "quant_type" in overrides[0]:
-                quant_type = overrides[0]["quant_type"].tensor_type
+                new_quant_type = overrides[0]["quant_type"]
+                if is_weight and new_quant_type in (
+                    QuantType.QInt4,
+                    QuantType.QInt8,
+                    QuantType.QInt16,
+                    QuantType.QFLOAT8E4M3FN,
+                ):
+                    is_symmetric = True
+                quant_type = new_quant_type.tensor_type
 
             channel_axis = overrides[0].get("axis", tensor_info.axis)
             is_per_channel = channel_axis is not None
