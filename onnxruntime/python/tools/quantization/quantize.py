@@ -243,10 +243,10 @@ def get_int_qdq_config(
         activation_type: The default activation quantization type. Defaults to QUInt8.
         weight_type: The default weight quantization type. Defaults to QUInt8.
         activation_symmetric: True if activations should be quantized symmetrically (i.e, rmax == -rmin) by default.
-            Defaults to false. For int8 and int16, this results in zero-point values of 0. For uint8 and uin16,
-            the zero-point values are 128 and 32,768, respectively.
+            Defaults to false. For int8 and int16, this results in zero-point values of 0. For uint8 and uint16,
+            the zero-point values are 127 and 32,767, respectively.
         weight_symmetric: True if weights should be quantized symmetrically (i.e., rmax == -rmin) by default.
-            Defaults to None. If set to None, weight_symmetric is assumed true if the weight_type is a signed int.
+            Defaults to None. If set to None, weight_symmetric is assumed true if a weight's quant type is a signed int.
         per_channel: Global option that determines if a fixed set of operator types should be quantized per-channel.
             Defaults to false. Alternatively, use the tensor-level `tensor_quant_overrides` to select individual operators
             and their quantization axes.
@@ -255,6 +255,9 @@ def get_int_qdq_config(
                         are automatically removed if activations are asymmetrically quantized. Keeping these activations
                         is necessary if optimizations or EP transformations will later remove
                         QuantizeLinear/DequantizeLinear operators from the model.
+        min_real_range: Default is None. If set to a floating-point value, the calculation of the quantization parameters
+            (i.e., scale and zero point) will enforce a minimum range between rmin and rmax. If (rmax - rmin)
+            is less than the specified minimum range, rmax will be set to rmin + min_real_range.
         tensor_quant_overrides: tensor-level quantization overrides. Defaults to None.
             The key is a tensor name and the value is a list of dictionaries. For per-tensor quantization, the list
             contains a single dictionary. For per-channel quantization, the list contains either a dictionary for
@@ -279,17 +282,17 @@ def get_int_qdq_config(
                 'convert["recv_nodes"] = Set : Set of node names that consume the converted activation,
                                                other nodes get the original type. If not specified,
                                                assume all consumer nodes get the converted type.
+        nodes_to_exclude: List of nodes names to exclude from quantization.
+        extra_options: Additional options specified as string key/value pairs. Refer to the documentation for
+            `quantize_static` for valid keys and values.
 
     Returns:
         A StaticQuantConfig object
     """
     q16_types = {QuantType.QInt16, QuantType.QUInt16}
     q4_types = {QuantType.QInt4, QuantType.QUInt4}
-    op_types_to_exclude = {"Cast"}
+    op_types_to_exclude = {"Cast", "DequantizeLinear", "QuantizeLinear"}
     model_size_threshold = 2147483648  # Quant model should use external data if >= 2GB
-
-    if weight_symmetric is None:
-        weight_symmetric = weight_type in {QuantType.QInt8, QuantType.QInt16}
 
     model = (
         model_input
