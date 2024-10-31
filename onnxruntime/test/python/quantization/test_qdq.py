@@ -1653,7 +1653,6 @@ class TestQDQ4bit(TestQDQFormat):
                 expected_int4_val = np.clip(np.float32(float_val / scale_val).round() + zp_val, -8, 7)
                 int4_pair = onnx.subbyte.unpack_single_4bitx2(weight_quant_init.raw_data[index >> 1], True)
                 int4_val = int4_pair[index & 0x1]
-
                 self.assertEqual(np.float32(int4_val), expected_int4_val)
 
     def test_int4_qdq_per_channel_conv(self):

@@ -1355,25 +1355,27 @@ class QDQQuantizer(BaseQuantizer):
 
             # Compute scale/zp normally. User's overrides may still override parameters
             # used to compute the scale/zp (e.g., rmin, rmax, symmetric, etc.)
-            is_symmetric = self.is_weight_symmetric if is_weight else self.is_activation_symmetric
             overrides = self.tensor_quant_overrides.get(tensor_name, [{}])
+            channel_axis = overrides[0].get("axis", tensor_info.axis)
+            is_per_channel = channel_axis is not None
+            is_symmetric = is_per_channel or (self.is_weight_symmetric if is_weight else self.is_activation_symmetric)
 
             if "quant_type" in overrides[0]:
                 new_quant_type = overrides[0]["quant_type"]
-                if is_weight and new_quant_type in (
-                    QuantType.QInt4,
-                    QuantType.QInt8,
-                    QuantType.QInt16,
-                    QuantType.QFLOAT8E4M3FN,
+                if is_per_channel or (
+                    is_weight
+                    and new_quant_type
+                    in (
+                        QuantType.QInt4,
+                        QuantType.QInt8,
+                        QuantType.QInt16,
+                        QuantType.QFLOAT8E4M3FN,
+                    )
                 ):
                     is_symmetric = True
                 quant_type = new_quant_type.tensor_type
 
-            channel_axis = overrides[0].get("axis", tensor_info.axis)
-            is_per_channel = channel_axis is not None
-            is_symmetric = overrides[0].get(
-                "symmetric", is_per_channel or (self.is_weight_symmetric if is_weight else self.is_activation_symmetric)
-            )
+            is_symmetric = overrides[0].get("symmetric", is_symmetric)
             reduce_range = overrides[0].get("reduce_range", self.reduce_range)
             zero_point: np.ndarray | None = None
             scale: np.ndarray | None = None
@@ -1385,6 +1387,8 @@ class QDQQuantizer(BaseQuantizer):
                     is_symmetric,
                     reduce_range=reduce_range,
                     min_real_range=self.min_real_range,
+                    rmin_override=overrides[0].get("rmin"),
+                    rmax_override=overrides[0].get("rmax"),
                 )
             else:
                 is_axis_valid, norm_channel_axis = normalize_axis(channel_axis, initializer_rank)
