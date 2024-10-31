@@ -10,25 +10,26 @@ using namespace onnxruntime;
 
 namespace onnxruntime {
 struct CoreMLProviderFactory : IExecutionProviderFactory {
-  CoreMLProviderFactory(uint32_t coreml_flags)
-      : coreml_flags_(coreml_flags) {}
+  CoreMLProviderFactory(const ProviderOptions& options)
+      : options_(options) {}
   ~CoreMLProviderFactory() override {}
 
   std::unique_ptr<IExecutionProvider> CreateProvider() override;
-  uint32_t coreml_flags_;
+  const ProviderOptions options_;
 };
 
 std::unique_ptr<IExecutionProvider> CoreMLProviderFactory::CreateProvider() {
-  return std::make_unique<CoreMLExecutionProvider>(coreml_flags_);
+  return std::make_unique<CoreMLExecutionProvider>(options_);
 }
 
-std::shared_ptr<IExecutionProviderFactory> CoreMLProviderFactoryCreator::Create(uint32_t coreml_flags) {
-  return std::make_shared<onnxruntime::CoreMLProviderFactory>(coreml_flags);
+std::shared_ptr<IExecutionProviderFactory> CoreMLProviderFactoryCreator::Create(const ProviderOptions& options) {
+  return std::make_shared<onnxruntime::CoreMLProviderFactory>(options);
 }
 }  // namespace onnxruntime
 
 ORT_API_STATUS_IMPL(OrtSessionOptionsAppendExecutionProvider_CoreML,
                     _In_ OrtSessionOptions* options, uint32_t coreml_flags) {
-  options->provider_factories.push_back(onnxruntime::CoreMLProviderFactoryCreator::Create(coreml_flags));
+  options->provider_factories.push_back(onnxruntime::CoreMLProviderFactoryCreator::Create(
+      {{"coreml_flags", std::to_string(coreml_flags)}}));
   return nullptr;
 }

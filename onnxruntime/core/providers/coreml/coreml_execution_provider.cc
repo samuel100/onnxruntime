@@ -23,17 +23,17 @@ namespace onnxruntime {
 
 constexpr const char* COREML = "CoreML";
 
-CoreMLExecutionProvider::CoreMLExecutionProvider(uint32_t coreml_flags)
+CoreMLExecutionProvider::CoreMLExecutionProvider(const ProviderOptions& options)
     : IExecutionProvider{onnxruntime::kCoreMLExecutionProvider},
-      coreml_flags_(coreml_flags),
       coreml_version_(coreml::util::CoreMLVersion()) {
+  coreml_flags_ = options.count("coreml_flags") ? std::stoi(options.at("coreml_flags")) : 0;
   LOGS_DEFAULT(VERBOSE) << "CoreML version: " << coreml_version_;
   if (coreml_version_ < MINIMUM_COREML_VERSION) {
     LOGS_DEFAULT(ERROR) << "CoreML EP is not supported on this platform.";
   }
 
   // check if only one flag is set
-  if ((coreml_flags & COREML_FLAG_USE_CPU_ONLY) && (coreml_flags & COREML_FLAG_USE_CPU_AND_GPU)) {
+  if ((coreml_flags_ & COREML_FLAG_USE_CPU_ONLY) && (coreml_flags_ & COREML_FLAG_USE_CPU_AND_GPU)) {
     // multiple device options selected
     ORT_THROW(
         "Multiple device options selected, you should use at most one of the following options:"

@@ -1224,8 +1224,8 @@ std::unique_ptr<IExecutionProvider> CreateExecutionProviderInstance(
         }
       }
     }
-
-    return onnxruntime::CoreMLProviderFactoryCreator::Create(coreml_flags)->CreateProvider();
+    ProviderOptions provider_options = {{"coreml_flags", std::to_string(coreml_flags)}};
+    return onnxruntime::CoreMLProviderFactoryCreator::Create(provider_options)->CreateProvider();
 #endif
   } else if (type == kXnnpackExecutionProvider) {
 #if defined(USE_XNNPACK)

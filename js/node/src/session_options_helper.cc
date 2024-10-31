@@ -79,7 +79,9 @@ void ParseExecutionProviders(const Napi::Array epList, Ort::SessionOptions& sess
 #endif
 #ifdef USE_COREML
     } else if (name == "coreml") {
-      Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CoreML(sessionOptions, coreMlFlags));
+      std::unordered_map<std::string, std::string> options;
+      options["coreml_flags"] = std::string(coreMlFlags);
+      sessionOptions.AppendExecutionProvider("CoreML", options);
 #endif
 #ifdef USE_QNN
     } else if (name == "qnn") {

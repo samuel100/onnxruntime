@@ -14,7 +14,7 @@ class Model;
 
 class CoreMLExecutionProvider : public IExecutionProvider {
  public:
-  CoreMLExecutionProvider(uint32_t coreml_flags);
+  CoreMLExecutionProvider(const ProviderOptions& options);
   virtual ~CoreMLExecutionProvider();
 
   std::vector<std::unique_ptr<ComputeCapability>>
