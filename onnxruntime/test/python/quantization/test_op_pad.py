@@ -527,8 +527,8 @@ class TestQDQPad(unittest.TestCase):
         cls._tmp_model_dir = tempfile.TemporaryDirectory(prefix="ort.qdq.pad_")
 
         # Note: swap with the commented line if you want to see the models in local test dir.
-        # cls._tmp_dir_path = cls._tmp_model_dir.name
-        cls._tmp_dir_path = "."
+        cls._tmp_dir_path = cls._tmp_model_dir.name
+        # cls._tmp_dir_path = "."
 
     @classmethod
     def tearDownClass(cls):
@@ -569,6 +569,9 @@ class TestQDQPad(unittest.TestCase):
         return model
 
     def test_qdq_pad_qparams(self):
+        """
+        Test that QDQ Pad has equal scale/zero-point for its input and output for certain configurations.
+        """
         test_configs = [
             ("constant", None),
             ("constant", 0),
@@ -599,6 +602,7 @@ class TestQDQPad(unittest.TestCase):
                     float_model_path,
                     qdq_model_path,
                     data_reader,
+                    quant_format=QuantFormat.QDQ,
                     activation_type=QuantType.QUInt8,
                     weight_type=QuantType.QInt8,
                     extra_options={"ForceQuantizeNoInputCheck": True},
