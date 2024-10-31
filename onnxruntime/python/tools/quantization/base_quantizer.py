@@ -310,6 +310,7 @@ class BaseQuantizer:
                                   If keep_float_weight is False, quantize the weight, or don't quantize the weight.
         :return: quantized weight name, zero point name, scale name
         """
+        # TODO(adrianlizarraga): This function is now only used by onnx_quantizer.py, so move it there.
         q_weight_name = weight.name + TENSOR_NAME_QUANT_SUFFIX
         zp_name = weight.name + "_zero_point"
         scale_name = weight.name + "_scale"
@@ -400,6 +401,7 @@ class BaseQuantizer:
         reduce_range=True,
         keep_float_weight=False,
     ):
+        # TODO(adrianlizarraga): This function is now only used by onnx_quantizer.py, so move it there.
         initializer = find_by_name(weight_name, self.model.initializer())
         if initializer is None:
             raise ValueError("{} is not an initializer", weight_name)

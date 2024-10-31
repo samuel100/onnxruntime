@@ -421,9 +421,17 @@ class QDQQuantizer(BaseQuantizer):
         A bias scale that is too small leads to quantized bias values that fall outside the range of a int32 and have to
         be clipped, which decreases accuracy. If this function detects such a scenario, the weight_scale value will be
         increased to prevent this from happening.
+
         Although the adjustment method and amount differs, the idea to adjust the weight's scale came from the following
         reference:
         https://github.com/tensorflow/tensorflow/blob/master/tensorflow/lite/tools/optimize/quantization_utils.cc#L252
+
+        :param input_scale: The input's scale.
+        :param weight_scale: The weight scale to potentially adjust.
+        :param weight_name: The weight initializer's name. Used for logging.
+        :param bias_tp: The bias ONNX initializer.
+        :param is_per_channel: True if the bias and weight are quantized per-channel.
+        :return: A tuple with a bool indicating if the weight's scale was adjusted and the new weight scale.
         """
         if not weight_scale.size:
             return False, None
@@ -488,7 +496,7 @@ class QDQQuantizer(BaseQuantizer):
         """
 
         if self.qdq_disable_weight_adjust_for_int32_bias:
-            # Use passed an extra_option to disable this adjustment.
+            # User passed an extra_option to disable this adjustment.
             return
 
         for bias_name, bias_info in self.bias_to_quantize.items():
