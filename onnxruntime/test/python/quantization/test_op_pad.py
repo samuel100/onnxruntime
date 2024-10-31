@@ -576,7 +576,7 @@ class TestQDQPad(unittest.TestCase):
         test_configs = [
             ("constant", None),
             ("constant", 0),
-            ("constant", 100),
+            ("constant", 10.0),
             ("reflect", None),
             ("edge", None),
             ("wrap", None),
@@ -608,6 +608,18 @@ class TestQDQPad(unittest.TestCase):
                     weight_type=QuantType.QInt8,
                     extra_options={"ForceQuantizeNoInputCheck": True},
                 )
+
+                expected_op_counts = {"DequantizeLinear": 2, "QuantizeLinear": 2, "Pad": 1}
+                if constant_value is not None:
+                    expected_op_counts["DequantizeLinear"] += 1  # The constant padding value is quantized.
+                check_op_type_count(self, qdq_model_path, **expected_op_counts)
+
+                if pad_mode != "reflect":
+                    # Do not check model correctness for 'reflect' mode because ONNX Runtime implementation does
+                    # not match the ONNX reference implementation. See the following issue:
+                    # https://github.com/microsoft/onnxruntime/issues/20801
+                    data_reader.rewind()
+                    check_model_correctness(self, float_model_path, qdq_model_path, data_reader.get_next())
 
                 qdq_model = onnx.load_model(qdq_model_path)
                 quant_output_same_as_input = False
