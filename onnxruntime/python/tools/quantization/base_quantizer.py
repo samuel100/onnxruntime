@@ -21,7 +21,6 @@ from .onnx_model import ONNXModel
 from .quant_utils import (
     ONNX_TYPE_TO_NP_TYPE,
     TENSOR_NAME_QUANT_SUFFIX,
-    QuantType,
     find_by_name,
     model_has_infer_metadata,
     normalize_axis,
@@ -96,9 +95,10 @@ class BaseQuantizer:
         self.force_quantize_no_input_check = (
             "ForceQuantizeNoInputCheck" in self.extra_options and self.extra_options["ForceQuantizeNoInputCheck"]
         )
-        self.is_weight_symmetric = self.extra_options.get(
-            "WeightSymmetric", weight_qType in (QuantType.QInt8, QuantType.QInt16, QuantType.QFLOAT8E4M3FN)
-        )
+
+        # If user does not explicitly set "WeightSymmetric", then the weight's quantization type determines
+        # the symmetry (i.e., signed integer types will use symmetric quantization). See `def is_weight_symmetric()`
+        self._is_weight_symmetric: bool | None = self.extra_options.get("WeightSymmetric", None)
         self.is_activation_symmetric = self.extra_options.get("ActivationSymmetric", False)
         self.min_real_range = self.extra_options.get("MinimumRealRange")
 
@@ -138,6 +138,16 @@ class BaseQuantizer:
             raise ValueError(overrides_err)
 
         self.tensor_quant_override_qtypes = self.tensor_quant_overrides.get_quant_types()
+
+    def is_weight_symmetric(self, weight_quant_type: onnx.TensorProto.DataType) -> bool:
+        if self._is_weight_symmetric is not None:
+            return self._is_weight_symmetric  # Return value explicitly set by user.
+        return weight_quant_type in (
+            onnx.TensorProto.INT4,
+            onnx.TensorProto.INT8,
+            onnx.TensorProto.INT16,
+            onnx.TensorProto.FLOAT8E4M3FN,
+        )
 
     def quantize_model(self):
         raise NotImplementedError
@@ -321,7 +331,7 @@ class BaseQuantizer:
             assert isinstance(scale, np.ndarray), f"Unexpected type {type(scale)}"
 
         else:
-            symmetric = self.is_weight_symmetric if qType == self.weight_qType else self.is_activation_symmetric
+            symmetric = self.is_weight_symmetric(qType) if qType == self.weight_qType else self.is_activation_symmetric
             zero_point, scale, q_weight_data = quantize_data(
                 weight_data.flatten(),
                 qType,
@@ -428,13 +438,7 @@ class BaseQuantizer:
         if "quant_type" in quant_overrides_for_channels[0]:
             weight_qType = quant_overrides_for_channels[0]["quant_type"].tensor_type  # noqa: N806
 
-        symmetric = quant_overrides_for_channels[0].get(
-            "symmetric",
-            (
-                self.is_weight_symmetric
-                or weight_qType in (onnx.TensorProto.INT8, onnx.TensorProto.FLOAT8E4M3FN, onnx.TensorProto.INT4)
-            ),
-        )
+        symmetric = quant_overrides_for_channels[0].get("symmetric", self.is_weight_symmetric(weight_qType))
         reduce_range = quant_overrides_for_channels[0].get("reduce_range", self.reduce_range and reduce_range)
         zero_point_list = []
         scale_list = []

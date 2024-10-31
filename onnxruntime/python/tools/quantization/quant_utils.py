@@ -108,24 +108,6 @@ class QuantType(Enum):
         except KeyError:
             raise ValueError()  # noqa: B904
 
-    @staticmethod
-    def from_tensor_type(tensor_type: onnx.TensorProto.DataType):
-        if tensor_type == TensorProto.INT8:
-            return QuantType.QInt8
-        if tensor_type == TensorProto.UINT8:
-            return QuantType.QUInt8
-        if tensor_type == TensorProto.INT16:
-            return QuantType.QInt16
-        if tensor_type == TensorProto.UINT16:
-            return QuantType.QUInt16
-        if tensor_type == TensorProto.FLOAT8E4M3FN:
-            return QuantType.QFLOAT8E4M3FN
-        if tensor_type == TensorProto.UINT4:
-            return QuantType.QUInt4
-        if tensor_type == TensorProto.INT4:
-            return QuantType.QInt4
-        raise ValueError(f"Unexpected tensor type value={tensor_type}.")
-
     @property
     def tensor_type(self):
         if self == QuantType.QInt8:

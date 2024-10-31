@@ -24,7 +24,6 @@ from .quant_utils import (
     QUANT_OP_NAME,
     QuantizedValue,
     QuantizedValueType,
-    QuantType,
     __producer__,
     __version__,
     add_dequant_output_suffix,
@@ -1311,7 +1310,7 @@ class QDQQuantizer(BaseQuantizer):
             initializer_data = tensor_proto_to_array(initializer)
             initializer_rank = len(initializer_data.shape)
 
-            # initializers for elementwise ops can be considered activations.
+            # initializers for elementwise ops use the quant_type for activations.
             is_weight = tensor_info.tensor_type is QDQQuantTensorType.WEIGHT
             quant_type = self.weight_qType if is_weight else self.activation_qType
 
@@ -1356,26 +1355,18 @@ class QDQQuantizer(BaseQuantizer):
             # Compute scale/zp normally. User's overrides may still override parameters
             # used to compute the scale/zp (e.g., rmin, rmax, symmetric, etc.)
             overrides = self.tensor_quant_overrides.get(tensor_name, [{}])
+            if "quant_type" in overrides[0]:
+                quant_type = overrides[0]["quant_type"].tensor_type
+
             channel_axis = overrides[0].get("axis", tensor_info.axis)
             is_per_channel = channel_axis is not None
-            is_symmetric = is_per_channel or (self.is_weight_symmetric if is_weight else self.is_activation_symmetric)
 
-            if "quant_type" in overrides[0]:
-                new_quant_type = overrides[0]["quant_type"]
-                if is_per_channel or (
-                    is_weight
-                    and new_quant_type
-                    in (
-                        QuantType.QInt4,
-                        QuantType.QInt8,
-                        QuantType.QInt16,
-                        QuantType.QFLOAT8E4M3FN,
-                    )
-                ):
-                    is_symmetric = True
-                quant_type = new_quant_type.tensor_type
-
-            is_symmetric = overrides[0].get("symmetric", is_symmetric)
+            # Note: always quantize per-channel initializers as symmetric because QLinear* ops require the
+            # same zero-point in every channel, which is necessarily the case for symmetric quantization.
+            is_symmetric_default = is_per_channel or (
+                self.is_weight_symmetric(quant_type) if is_weight else self.is_activation_symmetric
+            )
+            is_symmetric = overrides[0].get("symmetric", is_symmetric_default)
             reduce_range = overrides[0].get("reduce_range", self.reduce_range)
             zero_point: np.ndarray | None = None
             scale: np.ndarray | None = None
